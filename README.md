@@ -200,6 +200,17 @@ PIKVM_INTEGRATION=1 PIKVM_ALLOW_MSD_ACTIONS=1 \
 
 Keep destructive or state-changing tests opt-in even on lab hardware.
 
+ATX action tests require both the general ATX opt-in and a specific action:
+
+```bash
+PIKVM_INTEGRATION=1 PIKVM_ALLOW_ATX_ACTIONS=1 \
+  PIKVM_TEST_ATX_ACTION=power_on \
+  uv run pytest tests/integration -m "integration and atx_action"
+```
+
+Use ATX actions only when the PiKVM ATX header wiring and LED state are known
+to be reliable for the target.
+
 ## Available Tools
 
 ### MSD (Mass Storage Device)

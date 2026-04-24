@@ -89,3 +89,8 @@ def hid_actions_enabled() -> None:
 @pytest.fixture
 def msd_actions_enabled() -> None:
     require_action_enabled("msd")
+
+
+@pytest.fixture
+def atx_actions_enabled() -> None:
+    require_action_enabled("atx")
