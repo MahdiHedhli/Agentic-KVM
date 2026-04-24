@@ -21,8 +21,12 @@ updates during the download.  Each event is a JSON payload::
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import structlog
 
@@ -78,6 +82,43 @@ async def msd_state(client: Any) -> dict[str, Any]:
     return await client.get("/api/msd")
 
 
+def _image_name_from_url(url: str) -> str:
+    """Return the image filename PiKVM will derive from a remote URL."""
+    name = PurePosixPath(unquote(urlparse(url).path)).name
+    if not name:
+        raise ValueError(f"Could not derive image name from URL: {url}")
+    return name
+
+
+async def _wait_for_remote_image(
+    client: Any,
+    *,
+    image: str,
+    timeout: float,
+) -> dict[str, Any]:
+    """Poll MSD state until a remotely fetched image appears complete."""
+    deadline = time.monotonic() + timeout
+    while True:
+        state = await msd_state(client)
+        storage = state["result"]["storage"]
+        image_info = storage["images"].get(image)
+        if image_info and image_info.get("complete", True):
+            size = image_info.get("size", 0)
+            return {
+                "status": "finish",
+                "percent": 100,
+                "total_bytes": size,
+                "written_bytes": size,
+                "error": None,
+                "image": image,
+            }
+
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Timed out waiting for MSD image to finish: {image}")
+
+        await asyncio.sleep(1)
+
+
 async def msd_upload_url(client: Any, *, url: str, timeout: float = 600) -> dict[str, Any]:
     """Tell PiKVM to fetch an image from a URL and store it in MSD storage.
 
@@ -88,6 +129,7 @@ async def msd_upload_url(client: Any, *, url: str, timeout: float = 600) -> dict
     PiKVM firmware).
     """
     progress = UploadProgress()
+    image = _image_name_from_url(url)
 
     try:
         async for event in client.stream_sse(
@@ -108,19 +150,30 @@ async def msd_upload_url(client: Any, *, url: str, timeout: float = 600) -> dict
                 break
     except (AttributeError, NotImplementedError):
         # Fallback: client doesn't support SSE (e.g. mock or older backend)
-        result = await client.post(
+        await client.post(
             "/api/msd/write_remote",
             params={"url": url},
             timeout=timeout,
         )
-        return result
+        return {
+            "ok": True,
+            "result": await _wait_for_remote_image(client, image=image, timeout=timeout),
+        }
 
     if progress.error:
         raise RuntimeError(f"MSD upload failed: {progress.error}")
 
+    if not progress.finished:
+        return {
+            "ok": True,
+            "result": await _wait_for_remote_image(client, image=image, timeout=timeout),
+        }
+
+    result = progress.to_dict()
+    result["image"] = image
     return {
         "ok": True,
-        "result": progress.to_dict(),
+        "result": result,
     }
 
 
@@ -136,9 +189,21 @@ async def msd_set_image(
 
 async def msd_connect(client: Any) -> dict[str, Any]:
     """Connect (plug in) the virtual drive to the target machine."""
+    state = await msd_state(client)
+    if state["result"]["drive"]["connected"]:
+        return {
+            "ok": True,
+            "result": {"connected": True, "already_connected": True},
+        }
     return await client.post("/api/msd/set_connected", params={"connected": 1})
 
 
 async def msd_disconnect(client: Any) -> dict[str, Any]:
     """Disconnect (unplug) the virtual drive from the target machine."""
+    state = await msd_state(client)
+    if not state["result"]["drive"]["connected"]:
+        return {
+            "ok": True,
+            "result": {"connected": False, "already_disconnected": True},
+        }
     return await client.post("/api/msd/set_connected", params={"connected": 0})

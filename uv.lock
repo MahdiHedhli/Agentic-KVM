@@ -644,6 +644,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-dotenv" },
     { name = "respx" },
     { name = "ruff" },
 ]
@@ -661,6 +662,7 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "respx", specifier = ">=0.22" },
     { name = "ruff", specifier = ">=0.8" },
 ]

@@ -280,11 +280,30 @@ class PiKVMClient(TargetBackend):
 
     async def get_raw(self, path: str, **kwargs: Any) -> bytes:
         """GET that returns raw bytes (e.g. JPEG screenshots)."""
-        async with self._lock:
-            client = await self._ensure_client()
-            resp = await client.get(path, **kwargs)
-            resp.raise_for_status()
-            return resp.content
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            async with self._lock:
+                try:
+                    client = await self._ensure_client()
+                    resp = await client.get(path, **kwargs)
+                    resp.raise_for_status()
+                    return resp.content
+                except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                    last_exc = exc
+                    wait = _BACKOFF_BASE * (2**attempt)
+                    logger.warning(
+                        "raw_request_retry",
+                        target=self._cfg.name,
+                        path=path,
+                        attempt=attempt + 1,
+                        wait=wait,
+                        error=str(exc),
+                    )
+            await asyncio.sleep(wait)
+
+        raise ConnectionError(
+            f"PiKVM raw request failed after {_MAX_RETRIES} retries: {last_exc}"
+        ) from last_exc
 
     async def stream_sse(self, path: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         """POST with SSE streaming response.

@@ -117,3 +117,22 @@ class TestAuditedDecorator:
         logfile = tmp_path / f"session-{recorder.session_id}.jsonl"
         entry = json.loads(logfile.read_text().strip())
         assert entry["args"] == {"target": "lab-server"}
+
+    def test_drops_audit_only_kwargs_from_tool_call(self, tmp_path: Path) -> None:
+        class FakeClient:
+            pass
+
+        async def tool(*, client: FakeClient) -> dict[str, bool]:
+            return {"ok": True}
+
+        recorder = SessionRecorder(audit_dir=tmp_path, operator_id="test-op")
+        wrapped = audited(recorder, lambda **kwargs: kwargs["target"])(tool)
+        result = asyncio.run(wrapped(client=FakeClient(), target="lab-server"))
+        recorder.close()
+
+        assert result == {"ok": True}
+
+        logfile = tmp_path / f"session-{recorder.session_id}.jsonl"
+        entry = json.loads(logfile.read_text().strip())
+        assert entry["target_id"] == "lab-server"
+        assert entry["args"] == {"target": "lab-server"}

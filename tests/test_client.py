@@ -92,6 +92,50 @@ class TestPiKVMClient:
             assert "action=on" in str(route.calls[0].request.url)
         await client.close()
 
+    async def test_get_raw_retries_on_503(
+        self,
+        cfg: TargetConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = PiKVMClient(cfg)
+        call_count = 0
+        monkeypatch.setattr(client_module, "_BACKOFF_BASE", 0)
+
+        with respx.mock:
+            route = respx.get("https://pikvm-test.ts.net:443/api/streamer/snapshot")
+
+            def side_effect(request: httpx.Request) -> httpx.Response:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return httpx.Response(503, content=b"busy")
+                return httpx.Response(200, content=b"jpeg")
+
+            route.side_effect = side_effect
+            result = await client.get_raw("/api/streamer/snapshot")
+
+        assert result == b"jpeg"
+        assert call_count == 2
+        await client.close()
+
+    async def test_get_raw_retry_exhausted_raises(
+        self,
+        cfg: TargetConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        client = PiKVMClient(cfg)
+        monkeypatch.setattr(client_module, "_BACKOFF_BASE", 0)
+
+        with respx.mock:
+            respx.get("https://pikvm-test.ts.net:443/api/streamer/snapshot").respond(
+                status_code=503,
+                content=b"busy",
+            )
+            with pytest.raises(ConnectionError, match="raw request failed"):
+                await client.get_raw("/api/streamer/snapshot")
+
+        await client.close()
+
     async def test_target_name_property(self, cfg: TargetConfig) -> None:
         client = PiKVMClient(cfg)
         assert client.target_name == "test-kvm"

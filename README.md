@@ -12,7 +12,7 @@ Agentic-KVM exposes PiKVM's REST API as MCP tools that any AI agent can call:
 
 - **MSD** (Mass Storage Device) — Upload ISOs, mount virtual drives, boot from installers
 - **ATX** — Power on, power off, hard reset via motherboard header pins
-- **HID** — Keyboard, mouse, screenshots (skeleton in v0.1, full in v0.2)
+- **HID** — Keyboard, mouse, screenshots, and screenshot-based mouse calibration
 - **Audit trail** — Every tool call logged to JSONL for chain-of-custody
 
 ## Architecture
@@ -170,6 +170,36 @@ uv run pytest
 uv run ruff check src/ tests/
 ```
 
+### Live PiKVM Integration Tests
+
+Integration tests are skipped by default. They load PiKVM settings from `.env`
+and then overlay any `PIKVM_*` process environment variables.
+
+Read-only integration smoke:
+
+```bash
+PIKVM_INTEGRATION=1 uv run pytest tests/integration -m integration
+```
+
+HID action smoke, such as moving the mouse, requires a second explicit opt-in:
+
+```bash
+PIKVM_INTEGRATION=1 PIKVM_ALLOW_HID_ACTIONS=1 \
+  uv run pytest tests/integration -m "integration and hid_action"
+```
+
+Future MSD and ATX action tests should use the same pattern:
+`PIKVM_ALLOW_MSD_ACTIONS=1` and `PIKVM_ALLOW_ATX_ACTIONS=1`. The MSD action
+test expects an existing image in PiKVM storage and defaults to
+`PIKVM_TEST_MSD_IMAGE=netboot.xyz.iso`.
+
+```bash
+PIKVM_INTEGRATION=1 PIKVM_ALLOW_MSD_ACTIONS=1 \
+  uv run pytest tests/integration -m "integration and msd_action"
+```
+
+Keep destructive or state-changing tests opt-in even on lab hardware.
+
 ## Available Tools
 
 ### MSD (Mass Storage Device)
@@ -192,7 +222,7 @@ uv run ruff check src/ tests/
 - `pikvm_hid_type` — Type text string
 - `pikvm_hid_send_key` — Press/release a key
 - `pikvm_hid_shortcut` — Press a multi-key shortcut
-- `pikvm_mouse_move` — Move cursor using pixel or raw HID coordinates
+- `pikvm_mouse_move` — Move cursor using pixel or raw PiKVM absolute coordinates
 - `pikvm_mouse_click` — Click at the current or specified cursor position
 - `pikvm_mouse_scroll` — Scroll wheel events
 - `pikvm_hid_calibrate` — Refresh screenshot-based mouse calibration

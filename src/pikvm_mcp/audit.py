@@ -22,6 +22,7 @@ This is the chain-of-custody log the red team product depends on.
 from __future__ import annotations
 
 import json
+import inspect
 import time
 import uuid
 from collections.abc import Callable, Coroutine
@@ -128,13 +129,32 @@ def audited(
     def decorator(
         fn: Callable[..., Coroutine[Any, Any, Any]],
     ) -> Callable[..., Coroutine[Any, Any, Any]]:
+        signature = inspect.signature(fn)
+        accepts_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+        accepted_kwargs = {
+            name
+            for name, param in signature.parameters.items()
+            if param.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+
         @wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             target_id = resolve_target(**kwargs)
             t0 = time.monotonic()
             result_summary = "ok"
             try:
-                result = await fn(*args, **kwargs)
+                call_kwargs = kwargs
+                if not accepts_kwargs:
+                    call_kwargs = {
+                        key: value
+                        for key, value in kwargs.items()
+                        if key in accepted_kwargs
+                    }
+                result = await fn(*args, **call_kwargs)
                 return result
             except Exception as exc:
                 result_summary = f"error: {type(exc).__name__}: {exc}"
