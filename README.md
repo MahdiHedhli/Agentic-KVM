@@ -78,6 +78,39 @@ docker exec -i pikvm-mcp pikvm-mcp
 }
 ```
 
+### Local MCP Client Config
+
+For local dogfood, keep secrets in the ignored `.env` file and point the MCP
+client at that file with `PIKVM_ENV_FILE`. This avoids copying PiKVM passwords
+into client config files.
+
+```json
+{
+  "mcpServers": {
+    "agentic-kvm": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/Agentic-KVM",
+        "run",
+        "python",
+        "-m",
+        "pikvm_mcp.server"
+      ],
+      "env": {
+        "PYTHONPATH": "/path/to/Agentic-KVM/src",
+        "PIKVM_ENV_FILE": "/path/to/Agentic-KVM/.env"
+      }
+    }
+  }
+}
+```
+
+Replace `/path/to/Agentic-KVM` with your local checkout path.
+
+Production deployments should continue to pass real environment variables
+directly through the container, process supervisor, or secret manager.
+
 ## Multi-Target Configuration
 
 Agentic-KVM supports multiple PiKVM targets from day one.  Every tool accepts

@@ -17,7 +17,7 @@ from fastmcp import FastMCP
 
 from pikvm_mcp.audit import SessionRecorder, audited
 from pikvm_mcp.client import ClientRegistry
-from pikvm_mcp.config import AppConfig
+from pikvm_mcp.config import AppConfig, load_env_file_from_environment
 from pikvm_mcp.tools import atx, hid, msd
 
 # ---------------------------------------------------------------------------
@@ -73,6 +73,7 @@ def _resolve_target_name(**kwargs: Any) -> str:
 @asynccontextmanager
 async def lifespan(app: FastMCP):
     global _config, _registry, _recorder
+    env_file = load_env_file_from_environment()
     _config = AppConfig()
     _registry = ClientRegistry()
     _recorder = SessionRecorder(
@@ -86,6 +87,7 @@ async def lifespan(app: FastMCP):
         default_target=_config.default_target,
         audit_dir=str(_config.audit_dir),
         full_capture=_config.full_capture,
+        env_file=str(env_file) if env_file else None,
     )
     yield
     _recorder.close()

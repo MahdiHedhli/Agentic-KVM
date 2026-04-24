@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from pikvm_mcp.config import AppConfig, TargetConfig
+from pikvm_mcp.config import AppConfig, TargetConfig, load_env_file_from_environment
 
 
 class TestTargetConfig:
@@ -25,8 +27,6 @@ class TestTargetConfig:
 
 class TestAppConfig:
     def test_parse_targets_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import json
-
         targets = [
             {"name": "lab", "host": "pikvm-lab.ts.net"},
             {"name": "prod", "host": "pikvm-prod.ts.net", "port": 8443},
@@ -38,8 +38,6 @@ class TestAppConfig:
         assert cfg.targets[1].port == 8443
 
     def test_resolve_target_by_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import json
-
         targets = [
             {"name": "a", "host": "a.ts.net"},
             {"name": "b", "host": "b.ts.net"},
@@ -49,8 +47,6 @@ class TestAppConfig:
         assert cfg.resolve_target("b").host == "b.ts.net"
 
     def test_resolve_target_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import json
-
         targets = [
             {"name": "a", "host": "a.ts.net"},
             {"name": "b", "host": "b.ts.net"},
@@ -61,16 +57,12 @@ class TestAppConfig:
         assert cfg.resolve_target().name == "b"
 
     def test_resolve_target_first_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import json
-
         targets = [{"name": "only", "host": "only.ts.net"}]
         monkeypatch.setenv("PIKVM_TARGETS", json.dumps(targets))
         cfg = AppConfig()
         assert cfg.resolve_target().name == "only"
 
     def test_resolve_target_missing_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import json
-
         targets = [{"name": "a", "host": "a.ts.net"}]
         monkeypatch.setenv("PIKVM_TARGETS", json.dumps(targets))
         cfg = AppConfig()
@@ -90,3 +82,52 @@ class TestAppConfig:
         monkeypatch.setenv("PIKVM_FULL_CAPTURE", "true")
         cfg = AppConfig()
         assert cfg.full_capture is True
+
+
+class TestEnvFileLoading:
+    def test_no_env_file_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PIKVM_ENV_FILE", raising=False)
+        assert load_env_file_from_environment() is None
+
+    def test_loads_config_from_env_file(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "PIKVM_TARGETS='[{\"name\":\"lab\",\"host\":\"lab.ts.net\"}]'\n"
+            "PIKVM_DEFAULT_TARGET=lab\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PIKVM_ENV_FILE", str(env_file))
+        monkeypatch.delenv("PIKVM_TARGETS", raising=False)
+        monkeypatch.delenv("PIKVM_DEFAULT_TARGET", raising=False)
+
+        loaded = load_env_file_from_environment()
+        cfg = AppConfig()
+
+        assert loaded == env_file
+        assert cfg.resolve_target().host == "lab.ts.net"
+
+    def test_process_env_wins_over_env_file(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "PIKVM_TARGETS='[{\"name\":\"file\",\"host\":\"file.ts.net\"}]'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PIKVM_ENV_FILE", str(env_file))
+        monkeypatch.setenv(
+            "PIKVM_TARGETS",
+            json.dumps([{"name": "process", "host": "process.ts.net"}]),
+        )
+        monkeypatch.setenv("PIKVM_DEFAULT_TARGET", "process")
+
+        load_env_file_from_environment()
+        cfg = AppConfig()
+
+        assert cfg.resolve_target().host == "process.ts.net"

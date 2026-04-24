@@ -16,9 +16,11 @@ Environment variable layout (flat, Docker-friendly)::
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Self
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -109,3 +111,25 @@ class AppConfig(BaseSettings):
         if self.default_target:
             return self.resolve_target(self.default_target)
         return self.targets[0]
+
+
+def load_env_file_from_environment() -> Path | None:
+    """Load the optional dotenv file pointed to by PIKVM_ENV_FILE.
+
+    MCP clients often support passing a small ``env`` map but should not carry
+    PiKVM passwords directly in their config.  ``PIKVM_ENV_FILE`` lets local
+    dogfood clients point at an ignored .env file while production deployments
+    continue to use normal environment variables.
+
+    Existing process environment variables win over values from the file.
+    """
+    path = os.environ.get("PIKVM_ENV_FILE")
+    if not path:
+        return None
+
+    env_path = Path(path).expanduser()
+    if not env_path.exists():
+        raise FileNotFoundError(f"PIKVM_ENV_FILE does not exist: {env_path}")
+
+    load_dotenv(env_path, override=False)
+    return env_path
