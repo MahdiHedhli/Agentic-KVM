@@ -262,7 +262,7 @@ async def pikvm_hid_type(text: str, target: str | None = None) -> dict[str, Any]
 async def pikvm_hid_send_key(
     key: str,
     state: bool = True,
-    finish: bool = False,
+    finish: bool = True,
     target: str | None = None,
 ) -> dict[str, Any]:
     """Press or release a key.
@@ -273,8 +273,10 @@ async def pikvm_hid_send_key(
     - ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown
     - Modifiers: ShiftLeft, ControlLeft, AltLeft, MetaLeft (and Right variants)
 
-    state=True means press, state=False means release. finish=True asks PiKVM
-    to auto-release non-modifier keys after pressing.
+    state=True means press, state=False means release. finish=True is the safe
+    default for one-shot key presses because PiKVM auto-releases non-modifier
+    keys. Set finish=False only when intentionally holding a key down before a
+    later release event.
     """
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_target_name)(hid.send_key)

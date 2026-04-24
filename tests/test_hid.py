@@ -153,15 +153,30 @@ class TestKeyboard:
             assert route.calls[0].request.content == b"hello world"
         await client.close()
 
-    async def test_send_key(self, cfg: TargetConfig) -> None:
+    async def test_send_key_one_shot_default_autoreleases(self, cfg: TargetConfig) -> None:
         client = PiKVMClient(cfg)
         with respx.mock:
             route = respx.post(f"{BASE}/api/hid/events/send_key").respond(json={"ok": True})
-            result = await send_key(client, key="F12", state=True)
+            result = await send_key(client, key="Enter", state=True)
             assert result["ok"] is True
             url = str(route.calls[0].request.url)
-            assert "key=F12" in url
+            assert "key=Enter" in url
             assert "state=1" in url
+            assert "finish=1" in url
+        await client.close()
+
+    async def test_send_key_can_hold_when_explicitly_requested(
+        self, cfg: TargetConfig
+    ) -> None:
+        client = PiKVMClient(cfg)
+        with respx.mock:
+            route = respx.post(f"{BASE}/api/hid/events/send_key").respond(json={"ok": True})
+            result = await send_key(client, key="ShiftLeft", state=True, finish=False)
+            assert result["ok"] is True
+            url = str(route.calls[0].request.url)
+            assert "key=ShiftLeft" in url
+            assert "state=1" in url
+            assert "finish=0" in url
         await client.close()
 
     async def test_send_shortcut(self, cfg: TargetConfig) -> None:

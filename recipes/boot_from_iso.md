@@ -72,6 +72,9 @@ Common keys by vendor:
 pikvm_hid_send_key(key="F12", target="lab-server")
 ```
 
+Single key presses auto-release by default.  Use `finish=False` only when a
+workflow intentionally needs to hold a key down and send a later release event.
+
 You may need to send this repeatedly during POST.  A screenshot loop
 can confirm when the boot menu appears.
 

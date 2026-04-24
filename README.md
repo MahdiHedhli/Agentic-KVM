@@ -264,7 +264,7 @@ to be reliable for the target.
 - `pikvm_hid_state` — HID subsystem status
 - `pikvm_screenshot` — Capture JPEG screenshot with detected resolution
 - `pikvm_hid_type` — Type text string
-- `pikvm_hid_send_key` — Press/release a key
+- `pikvm_hid_send_key` — Press/release a key; one-shot presses auto-release by default
 - `pikvm_hid_shortcut` — Press a multi-key shortcut
 - `pikvm_mouse_move` — Move cursor using pixel or raw PiKVM absolute coordinates
 - `pikvm_mouse_click` — Click at the current or specified cursor position

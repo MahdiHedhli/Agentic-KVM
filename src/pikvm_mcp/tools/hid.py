@@ -202,7 +202,7 @@ async def type_text(client: Any, *, text: str) -> dict[str, Any]:
 
 
 async def send_key(
-    client: Any, *, key: str, state: bool = True, finish: bool = False
+    client: Any, *, key: str, state: bool = True, finish: bool = True
 ) -> dict[str, Any]:
     """Press or release a single key.
 
@@ -216,9 +216,9 @@ async def send_key(
                    AltLeft, AltRight, MetaLeft, MetaRight
         Navigation: Home, End, PageUp, PageDown
 
-    ``state`` True = press, False = release.  ``finish`` asks PiKVM to release
-    non-modifier keys immediately after pressing, which is useful for one-shot
-    keys like Enter when the connection may be unstable.
+    ``state`` True = press, False = release.  ``finish`` defaults to True so
+    normal key presses auto-release.  Set ``finish=False`` only when you
+    intentionally want to hold a key down and will send a later release event.
     """
     return await client.post(
         "/api/hid/events/send_key",
