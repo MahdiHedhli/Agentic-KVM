@@ -118,12 +118,8 @@ async def _probe_fingerprint(host: str, port: int, expected: str) -> str:
         if der_cert is None:
             raise CertificatePinningError("No peer certificate presented")
 
-        actual = _verify_cert_fingerprint(der_cert, expected)
-        logger.info(
-            "cert_pinning_verified",
-            host=host,
-            fingerprint=actual,
-        )
+        _verify_cert_fingerprint(der_cert, expected)
+        logger.info("cert_pinning_verified")
         return ssl.DER_cert_to_PEM_cert(der_cert)
     finally:
         writer.close()
