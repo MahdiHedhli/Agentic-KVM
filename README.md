@@ -97,6 +97,7 @@ export PIKVM_DEFAULT_TARGET=lab-server
 | `PIKVM_DEFAULT_TARGET` | Name of the default target | First in list |
 | `PIKVM_OPERATOR_ID` | Operator ID for audit logs | `unknown` |
 | `PIKVM_AUDIT_DIR` | Directory for JSONL audit logs | `/var/log/pikvm-mcp` |
+| `PIKVM_FULL_CAPTURE` | Include operator-entered HID text in audit logs | `false` |
 
 ### Target config fields
 
@@ -123,6 +124,12 @@ The recommended deployment has PiKVM on your Tailnet:
 Self-signed SSL is the norm for PiKVM. The `verify_ssl: false` default is
 intentional, not lazy.
 
+When `cert_fingerprint` is set, Agentic-KVM first opens an unauthenticated TLS
+connection to verify the PiKVM certificate fingerprint. Only after that
+preflight succeeds does it create the authenticated HTTP client, using an SSL
+context that trusts the pinned certificate as its only trust root. This keeps
+PiKVM credentials off the wire when the presented certificate does not match.
+
 ## Audit Log
 
 Every tool invocation is recorded in `/var/log/pikvm-mcp/session-<id>.jsonl`:
@@ -140,7 +147,20 @@ Every tool invocation is recorded in `/var/log/pikvm-mcp/session-<id>.jsonl`:
 }
 ```
 
-Passwords and secrets are automatically stripped from logged arguments.
+Passwords, tokens, OTP secrets, and internal client objects are automatically
+stripped from logged arguments.
+
+Typed HID text is redacted by default because it may contain passwords, recovery
+keys, BIOS fields, or commands with secrets:
+
+```json
+{"tool": "type_text", "args": {"target": "lab-server", "text": "***"}}
+```
+
+For explicit engagement recording, set `PIKVM_FULL_CAPTURE=true`. Full capture
+logs typed HID text, but still redacts credential-like fields such as passwords,
+tokens, and OTP secrets. Only enable it when the operator and engagement scope
+permit sensitive input capture.
 
 ## Development
 
@@ -166,10 +186,29 @@ uv run ruff check src/ tests/
 - `pikvm_atx_power_off_hard` — 5-second hold
 - `pikvm_atx_reset` — Pulse reset button
 
-### HID (Keyboard/Mouse) — skeleton in v0.1
+### HID (Keyboard/Mouse)
 - `pikvm_hid_state` — HID subsystem status
+- `pikvm_screenshot` — Capture JPEG screenshot with detected resolution
 - `pikvm_hid_type` — Type text string
 - `pikvm_hid_send_key` — Press/release a key
+- `pikvm_hid_shortcut` — Press a multi-key shortcut
+- `pikvm_mouse_move` — Move cursor using pixel or raw HID coordinates
+- `pikvm_mouse_click` — Click at the current or specified cursor position
+- `pikvm_mouse_scroll` — Scroll wheel events
+- `pikvm_hid_calibrate` — Refresh screenshot-based mouse calibration
+
+## Dependency Hardening Plan
+
+The dogfood MVP currently uses broad dependency ranges and the checked-in
+`uv.lock` for reproducible local installs. Before production hardening, the
+project should move to pinned runtime dependencies, pinned Docker base/tool
+images, and a 30-day dependency soak rule: newly released dependency versions
+should not enter production images until they have aged for at least 30 days
+unless a security fix requires an explicit exception.
+
+The production hardening target for certificate pinning is per-connection peer
+certificate enforcement in the HTTP transport, so every new TLS connection is
+checked directly before authenticated request data is sent.
 
 ## License
 

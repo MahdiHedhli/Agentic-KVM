@@ -10,6 +10,7 @@ Environment variable layout (flat, Docker-friendly)::
     PIKVM_DEFAULT_TARGET=lab-server
     PIKVM_AUDIT_DIR=/var/log/pikvm-mcp
     PIKVM_OPERATOR_ID=operator@redteam
+    PIKVM_FULL_CAPTURE=false
 """
 
 from __future__ import annotations
@@ -75,6 +76,11 @@ class AppConfig(BaseSettings):
     operator_id: str = Field(
         default="unknown",
         alias="PIKVM_OPERATOR_ID",
+    )
+    full_capture: bool = Field(
+        default=False,
+        alias="PIKVM_FULL_CAPTURE",
+        description="Log sensitive operator-entered HID text for explicit full-capture sessions",
     )
 
     # --- Parsed from JSON at validation time ---

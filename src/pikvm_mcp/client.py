@@ -83,34 +83,32 @@ def _normalize_fingerprint(fp: str) -> str:
     return fp.replace(":", "").replace(" ", "").lower()
 
 
-def _verify_cert_fingerprint(
-    transport: httpx.AsyncBaseTransport,
-    expected_fingerprint: str,
-) -> None:
-    """Verify the peer certificate SHA-256 fingerprint after connection.
+def _verify_cert_fingerprint(der_cert: bytes, expected_fingerprint: str) -> str:
+    """Verify a DER certificate's SHA-256 fingerprint.
 
-    Raises ``CertificatePinningError`` if the fingerprint doesn't match.
-    This is called after the TLS handshake completes.
+    Returns the normalized actual fingerprint.  Raises ``CertificatePinningError``
+    if the expected and actual fingerprints differ.
     """
-    # httpx exposes the underlying SSL socket through the connection pool
-    # We access this via the transport's connection info
-    # For now, we do server-side fingerprint validation by making a probe
-    # connection — see _probe_fingerprint below
-    pass
+    expected_norm = _normalize_fingerprint(expected_fingerprint)
+    actual = hashlib.sha256(der_cert).hexdigest()
+    if actual != expected_norm:
+        raise CertificatePinningError(
+            f"Certificate fingerprint mismatch: expected {expected_norm}, got {actual}"
+        )
+    return actual
 
 
-async def _probe_fingerprint(host: str, port: int, expected: str) -> None:
-    """Open a raw TLS connection and verify the cert fingerprint.
+async def _probe_fingerprint(host: str, port: int, expected: str) -> str:
+    """Open a raw TLS connection, verify the fingerprint, and return cert PEM.
 
-    Called once when a PiKVMClient is created with cert_fingerprint set.
+    This preflight sends no PiKVM credentials.  The returned certificate is then
+    used as the only trust root for the authenticated HTTP client.
     """
-    expected_norm = _normalize_fingerprint(expected)
-
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # we're doing our own verification
 
-    reader, writer = await asyncio.open_connection(host, port, ssl=ctx)
+    _reader, writer = await asyncio.open_connection(host, port, ssl=ctx)
     try:
         ssl_object = writer.get_extra_info("ssl_object")
         if ssl_object is None:
@@ -120,17 +118,13 @@ async def _probe_fingerprint(host: str, port: int, expected: str) -> None:
         if der_cert is None:
             raise CertificatePinningError("No peer certificate presented")
 
-        actual = hashlib.sha256(der_cert).hexdigest()
-        if actual != expected_norm:
-            raise CertificatePinningError(
-                f"Certificate fingerprint mismatch: "
-                f"expected {expected_norm}, got {actual}"
-            )
+        actual = _verify_cert_fingerprint(der_cert, expected)
         logger.info(
             "cert_pinning_verified",
             host=host,
             fingerprint=actual,
         )
+        return ssl.DER_cert_to_PEM_cert(der_cert)
     finally:
         writer.close()
         await writer.wait_closed()
@@ -144,7 +138,10 @@ _MAX_RETRIES = 3
 _BACKOFF_BASE = 1.0  # seconds
 
 
-def _build_ssl_context(cfg: TargetConfig) -> ssl.SSLContext | bool:
+def _build_ssl_context(
+    cfg: TargetConfig,
+    pinned_cert_pem: str | None = None,
+) -> ssl.SSLContext | bool:
     """Build SSL context respecting verify_ssl and optional cert pinning."""
     if not cfg.https:
         return False
@@ -152,11 +149,15 @@ def _build_ssl_context(cfg: TargetConfig) -> ssl.SSLContext | bool:
         # No pinning — use verify_ssl as-is
         return cfg.verify_ssl
 
-    # Cert pinning: disable default verification (we verify the fingerprint
-    # ourselves via _probe_fingerprint), but still use TLS.
-    ctx = ssl.create_default_context()
+    if pinned_cert_pem is None:
+        raise ValueError("Pinned certificate PEM is required when cert_fingerprint is set")
+
+    # PiKVM-first pinning path: trust only the preflight-verified certificate
+    # for the real authenticated HTTP client. Hostname checks are disabled
+    # because PiKVM self-signed certificates commonly do not match Tailnet names.
+    ctx = ssl.create_default_context(cadata=pinned_cert_pem)
     ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx
 
 
@@ -167,9 +168,15 @@ class PiKVMClient(TargetBackend):
         self._cfg = cfg
         self._lock = asyncio.Lock()
         self._fingerprint_verified = False
-        self._client = httpx.AsyncClient(
-            base_url=cfg.base_url,
-            verify=_build_ssl_context(cfg),
+        self._pinned_cert_pem: str | None = None
+        self._client: httpx.AsyncClient | None = None
+        if not cfg.cert_fingerprint:
+            self._client = self._new_http_client(_build_ssl_context(cfg))
+
+    def _new_http_client(self, verify: ssl.SSLContext | bool) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self._cfg.base_url,
+            verify=verify,
             timeout=httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0),
             headers=self._auth_headers(),
         )
@@ -206,12 +213,21 @@ class PiKVMClient(TargetBackend):
         """Verify cert fingerprint on first use (if pinning is configured)."""
         if self._fingerprint_verified or not self._cfg.cert_fingerprint:
             return
-        await _probe_fingerprint(
+        self._pinned_cert_pem = await _probe_fingerprint(
             self._cfg.host,
             self._cfg.port,
             self._cfg.cert_fingerprint,
         )
         self._fingerprint_verified = True
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        """Return an initialized HTTP client, creating pinned clients after preflight."""
+        await self._ensure_fingerprint()
+        if self._client is None:
+            self._client = self._new_http_client(
+                _build_ssl_context(self._cfg, self._pinned_cert_pem)
+            )
+        return self._client
 
     @property
     def target_name(self) -> str:
@@ -224,12 +240,12 @@ class PiKVMClient(TargetBackend):
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Issue a request with per-target mutex and retry with backoff."""
-        await self._ensure_fingerprint()
         last_exc: Exception | None = None
         for attempt in range(_MAX_RETRIES):
             async with self._lock:
                 try:
-                    resp = await self._client.request(method, path, **kwargs)
+                    client = await self._ensure_client()
+                    resp = await client.request(method, path, **kwargs)
                     if resp.status_code == 409:
                         # KVMD contention — back off and retry
                         raise httpx.HTTPStatusError(
@@ -264,9 +280,9 @@ class PiKVMClient(TargetBackend):
 
     async def get_raw(self, path: str, **kwargs: Any) -> bytes:
         """GET that returns raw bytes (e.g. JPEG screenshots)."""
-        await self._ensure_fingerprint()
         async with self._lock:
-            resp = await self._client.get(path, **kwargs)
+            client = await self._ensure_client()
+            resp = await client.get(path, **kwargs)
             resp.raise_for_status()
             return resp.content
 
@@ -282,10 +298,10 @@ class PiKVMClient(TargetBackend):
         """
         import json
 
-        await self._ensure_fingerprint()
         timeout = kwargs.pop("timeout", 600)
         async with self._lock:
-            async with self._client.stream(
+            client = await self._ensure_client()
+            async with client.stream(
                 "POST",
                 path,
                 timeout=httpx.Timeout(connect=10.0, read=timeout, write=timeout, pool=10.0),
@@ -309,9 +325,9 @@ class PiKVMClient(TargetBackend):
 
     async def upload(self, path: str, data: bytes, filename: str) -> dict[str, Any]:
         """Upload binary data (e.g. ISO image) to PiKVM MSD."""
-        await self._ensure_fingerprint()
         async with self._lock:
-            resp = await self._client.post(
+            client = await self._ensure_client()
+            resp = await client.post(
                 path,
                 content=data,
                 headers={
@@ -325,7 +341,8 @@ class PiKVMClient(TargetBackend):
             return resp.json() if resp.content else {}
 
     async def close(self) -> None:
-        await self._client.aclose()
+        if self._client is not None:
+            await self._client.aclose()
 
 
 # ---------------------------------------------------------------------------

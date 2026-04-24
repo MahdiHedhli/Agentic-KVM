@@ -81,3 +81,12 @@ class TestAppConfig:
         cfg = AppConfig()
         with pytest.raises(ValueError, match="No PiKVM targets configured"):
             cfg.resolve_target()
+
+    def test_full_capture_default_false(self) -> None:
+        cfg = AppConfig()
+        assert cfg.full_capture is False
+
+    def test_full_capture_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PIKVM_FULL_CAPTURE", "true")
+        cfg = AppConfig()
+        assert cfg.full_capture is True

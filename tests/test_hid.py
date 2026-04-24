@@ -112,21 +112,20 @@ class TestDisplayCalibration:
     def test_pixel_to_hid_origin(self) -> None:
         cal = DisplayCalibration(width=1920, height=1080)
         hid_x, hid_y = cal.pixel_to_hid(0, 0)
-        assert hid_x == 0
-        assert hid_y == 0
+        assert hid_x == -32768
+        assert hid_y == -32768
 
     def test_pixel_to_hid_center(self) -> None:
         cal = DisplayCalibration(width=1920, height=1080)
         hid_x, hid_y = cal.pixel_to_hid(960, 540)
-        # Should be approximately half of 65535
-        assert 32000 < hid_x < 33000
-        assert 32000 < hid_y < 33000
+        assert hid_x in (0, -1)
+        assert hid_y in (0, -1)
 
     def test_pixel_to_hid_max(self) -> None:
         cal = DisplayCalibration(width=1920, height=1080)
         hid_x, hid_y = cal.pixel_to_hid(1920, 1080)
-        assert hid_x == 65535
-        assert hid_y == 65535
+        assert hid_x == 32767
+        assert hid_y == 32767
 
 
 # ---------------------------------------------------------------------------
@@ -151,27 +150,31 @@ class TestKeyboard:
             route = respx.post(f"{BASE}/api/hid/print").respond(json={"ok": True})
             result = await type_text(client, text="hello world")
             assert result["ok"] is True
-            assert "text=hello" in str(route.calls[0].request.url)
+            assert route.calls[0].request.content == b"hello world"
         await client.close()
 
     async def test_send_key(self, cfg: TargetConfig) -> None:
         client = PiKVMClient(cfg)
         with respx.mock:
-            respx.post(f"{BASE}/api/hid/events").respond(json={"ok": True})
+            route = respx.post(f"{BASE}/api/hid/events/send_key").respond(json={"ok": True})
             result = await send_key(client, key="F12", state=True)
             assert result["ok"] is True
+            url = str(route.calls[0].request.url)
+            assert "key=F12" in url
+            assert "state=1" in url
         await client.close()
 
     async def test_send_shortcut(self, cfg: TargetConfig) -> None:
         client = PiKVMClient(cfg)
         with respx.mock:
-            route = respx.post(f"{BASE}/api/hid/events").respond(json={"ok": True})
+            route = respx.post(f"{BASE}/api/hid/events/send_shortcut").respond(
+                json={"ok": True}
+            )
             result = await send_shortcut(
                 client, keys=["ControlLeft", "AltLeft", "Delete"], hold_ms=10
             )
             assert result["ok"] is True
-            # Should have been called at least twice (press + release)
-            assert len(route.calls) >= 2
+            assert "keys=ControlLeft%2CAltLeft%2CDelete" in str(route.calls[0].request.url)
         await client.close()
 
 
@@ -190,19 +193,27 @@ class TestMouse:
                 headers={"content-type": "image/jpeg"},
             )
             # Second call: mouse event
-            respx.post(f"{BASE}/api/hid/events").respond(json={"ok": True})
+            route = respx.post(f"{BASE}/api/hid/events/send_mouse_move").respond(
+                json={"ok": True}
+            )
 
             result = await mouse_move(client, x=960, y=540, absolute=True)
             assert result["ok"] is True
+            url = str(route.calls[0].request.url)
+            assert "to_x=" in url
+            assert "to_y=" in url
         await client.close()
 
     async def test_mouse_move_raw(self, cfg: TargetConfig) -> None:
         """Raw mode should NOT trigger calibration (no screenshot)."""
         client = PiKVMClient(cfg)
         with respx.mock:
-            respx.post(f"{BASE}/api/hid/events").respond(json={"ok": True})
+            route = respx.post(f"{BASE}/api/hid/events/send_mouse_move").respond(
+                json={"ok": True}
+            )
             result = await mouse_move(client, x=32767, y=32767, absolute=False)
             assert result["ok"] is True
+            assert "to_x=32767" in str(route.calls[0].request.url)
         await client.close()
 
     async def test_mouse_click_at_position(self, cfg: TargetConfig) -> None:
@@ -212,27 +223,40 @@ class TestMouse:
                 content=_make_jpeg(1920, 1080),
                 headers={"content-type": "image/jpeg"},
             )
-            respx.post(f"{BASE}/api/hid/events").respond(json={"ok": True})
+            move_route = respx.post(f"{BASE}/api/hid/events/send_mouse_move").respond(
+                json={"ok": True}
+            )
+            button_route = respx.post(f"{BASE}/api/hid/events/send_mouse_button").respond(
+                json={"ok": True}
+            )
 
             result = await mouse_click(client, button="left", x=100, y=200)
             assert result["ok"] is True
+            assert len(move_route.calls) == 1
+            assert len(button_route.calls) == 2
         await client.close()
 
     async def test_mouse_click_no_coords(self, cfg: TargetConfig) -> None:
         """Click without coordinates should not trigger calibration."""
         client = PiKVMClient(cfg)
         with respx.mock:
-            respx.post(f"{BASE}/api/hid/events").respond(json={"ok": True})
+            route = respx.post(f"{BASE}/api/hid/events/send_mouse_button").respond(
+                json={"ok": True}
+            )
             result = await mouse_click(client, button="right")
             assert result["ok"] is True
+            assert len(route.calls) == 2
         await client.close()
 
     async def test_mouse_scroll(self, cfg: TargetConfig) -> None:
         client = PiKVMClient(cfg)
         with respx.mock:
-            respx.post(f"{BASE}/api/hid/events").respond(json={"ok": True})
+            route = respx.post(f"{BASE}/api/hid/events/send_mouse_wheel").respond(
+                json={"ok": True}
+            )
             result = await mouse_scroll(client, delta_y=-3)
             assert result["ok"] is True
+            assert "delta_y=-3" in str(route.calls[0].request.url)
         await client.close()
 
 

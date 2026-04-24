@@ -6,6 +6,7 @@ import httpx
 import pytest
 import respx
 
+import pikvm_mcp.client as client_module
 from pikvm_mcp.client import PiKVMClient
 from pikvm_mcp.config import TargetConfig
 
@@ -94,4 +95,48 @@ class TestPiKVMClient:
     async def test_target_name_property(self, cfg: TargetConfig) -> None:
         client = PiKVMClient(cfg)
         assert client.target_name == "test-kvm"
+        await client.close()
+
+    async def test_pinned_client_preflights_before_authenticated_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cfg = TargetConfig(
+            name="pinned-kvm",
+            host="pikvm-test.ts.net",
+            port=443,
+            https=True,
+            username="admin",
+            password="secret",  # type: ignore[arg-type]
+            cert_fingerprint="aa" * 32,
+        )
+        calls: list[tuple[str, object]] = []
+
+        async def fake_probe(host: str, port: int, expected: str) -> str:
+            calls.append(("probe", (host, port, expected)))
+            return "PINNED PEM"
+
+        def fake_build_ssl_context(
+            cfg_arg: TargetConfig,
+            pinned_cert_pem: str | None = None,
+        ) -> bool:
+            calls.append(("build", pinned_cert_pem))
+            assert cfg_arg is cfg
+            return False
+
+        monkeypatch.setattr(client_module, "_probe_fingerprint", fake_probe)
+        monkeypatch.setattr(client_module, "_build_ssl_context", fake_build_ssl_context)
+
+        client = PiKVMClient(cfg)
+        assert client._client is None  # noqa: SLF001
+
+        with respx.mock:
+            respx.get("https://pikvm-test.ts.net:443/api/atx").respond(json={"ok": True})
+            result = await client.get("/api/atx")
+
+        assert result["ok"] is True
+        assert calls == [
+            ("probe", ("pikvm-test.ts.net", 443, "aa" * 32)),
+            ("build", "PINNED PEM"),
+        ]
         await client.close()

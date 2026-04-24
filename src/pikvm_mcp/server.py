@@ -7,6 +7,7 @@ unifi-network-mcp deployment pattern.
 from __future__ import annotations
 
 import base64
+import logging
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
@@ -29,7 +30,7 @@ structlog.configure(
         structlog.processors.add_log_level,
         structlog.processors.JSONRenderer(),
     ],
-    wrapper_class=structlog.make_filtering_bound_logger(structlog.get_config()["wrapper_class"]),
+    wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
     logger_factory=structlog.WriteLoggerFactory(file=sys.stderr),
 )
 logger = structlog.get_logger()
@@ -77,12 +78,14 @@ async def lifespan(app: FastMCP):
     _recorder = SessionRecorder(
         audit_dir=_config.audit_dir,
         operator_id=_config.operator_id,
+        full_capture=_config.full_capture,
     )
     logger.info(
         "server_started",
         targets=[t.name for t in _config.targets],
         default_target=_config.default_target,
         audit_dir=str(_config.audit_dir),
+        full_capture=_config.full_capture,
     )
     yield
     _recorder.close()
@@ -92,7 +95,7 @@ async def lifespan(app: FastMCP):
 
 mcp = FastMCP(
     "Agentic-KVM",
-    description="Bare-metal machine control via PiKVM — MSD, ATX, HID",
+    instructions="Bare-metal machine control via PiKVM — MSD, ATX, HID",
     lifespan=lifespan,
 )
 
@@ -255,7 +258,10 @@ async def pikvm_hid_type(text: str, target: str | None = None) -> dict[str, Any]
 
 @mcp.tool()
 async def pikvm_hid_send_key(
-    key: str, state: bool = True, target: str | None = None
+    key: str,
+    state: bool = True,
+    finish: bool = False,
+    target: str | None = None,
 ) -> dict[str, Any]:
     """Press or release a key.
 
@@ -265,11 +271,18 @@ async def pikvm_hid_send_key(
     - ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown
     - Modifiers: ShiftLeft, ControlLeft, AltLeft, MetaLeft (and Right variants)
 
-    state=True means press, state=False means release.
+    state=True means press, state=False means release. finish=True asks PiKVM
+    to auto-release non-modifier keys after pressing.
     """
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_target_name)(hid.send_key)
-    return await fn(client=_client_for(target), key=key, state=state, target=target)
+    return await fn(
+        client=_client_for(target),
+        key=key,
+        state=state,
+        finish=finish,
+        target=target,
+    )
 
 
 @mcp.tool()
@@ -293,8 +306,8 @@ async def pikvm_mouse_move(
     """Move the mouse cursor to coordinates.
 
     With absolute=True (default), x/y are pixel coordinates — auto-calibration
-    maps them to HID space using the detected screen resolution.
-    With absolute=False, x/y are raw HID coordinates (0–65535).
+    maps them to PiKVM's center-origin absolute coordinate space.
+    With absolute=False, x/y are raw PiKVM absolute coordinates.
     """
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_target_name)(hid.mouse_move)

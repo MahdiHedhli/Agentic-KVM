@@ -38,9 +38,10 @@ logger = structlog.get_logger()
 class SessionRecorder:
     """Append-only JSONL audit logger."""
 
-    def __init__(self, audit_dir: Path, operator_id: str) -> None:
+    def __init__(self, audit_dir: Path, operator_id: str, full_capture: bool = False) -> None:
         self.session_id = uuid.uuid4().hex[:8]
         self.operator_id = operator_id
+        self.full_capture = full_capture
         self._audit_dir = audit_dir
         self._audit_dir.mkdir(parents=True, exist_ok=True)
         self._path = self._audit_dir / f"session-{self.session_id}.jsonl"
@@ -62,7 +63,7 @@ class SessionRecorder:
             "target_id": target_id,
             "operator_id": self.operator_id,
             "tool": tool,
-            "args": _sanitize_args(args),
+            "args": _sanitize_args(args, full_capture=self.full_capture),
             "result": result,
             "duration_ms": round(duration_ms, 1),
         }
@@ -74,15 +75,39 @@ class SessionRecorder:
         logger.info("audit_session_closed", session_id=self.session_id)
 
 
-def _sanitize_args(args: dict[str, Any]) -> dict[str, Any]:
-    """Strip secrets from logged arguments."""
+def _sanitize_args(args: dict[str, Any], *, full_capture: bool = False) -> dict[str, Any]:
+    """Strip secrets and internal objects from logged arguments.
+
+    ``full_capture`` permits user-entered HID text in audit logs for explicit
+    engagement recording, but still redacts credential-like fields.
+    """
     sanitized = {}
     for k, v in args.items():
-        if any(secret in k.lower() for secret in ("password", "secret", "token", "otp")):
-            sanitized[k] = "***"
-        else:
-            sanitized[k] = v
+        if k == "client":
+            continue
+        sanitized[k] = _sanitize_value(k, v, full_capture=full_capture)
     return sanitized
+
+
+def _sanitize_value(key: str, value: Any, *, full_capture: bool) -> Any:
+    """Return a redacted, JSON-serializable representation for audit logs."""
+    key_lower = key.lower()
+    if any(secret in key_lower for secret in ("password", "secret", "token", "otp")):
+        return "***"
+    if key == "text" and not full_capture:
+        return "***"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_sanitize_value("", item, full_capture=full_capture) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_value("", item, full_capture=full_capture) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(k): _sanitize_value(str(k), v, full_capture=full_capture)
+            for k, v in value.items()
+        }
+    return repr(value)
 
 
 # ---------------------------------------------------------------------------

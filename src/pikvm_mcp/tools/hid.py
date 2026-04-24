@@ -3,26 +3,31 @@
 Full implementation covering:
 - Screenshot capture via /api/streamer/snapshot (returns JPEG)
 - Type text via /api/hid/print
-- Key press/release via /api/hid/events
+- Key press/release via /api/hid/events/send_key
 - Keyboard shortcuts (multi-key combos)
 - Mouse move/click/scroll with auto-calibration
-- Resolution detection and coordinate mapping (0-65535 HID space)
+- Resolution detection and coordinate mapping to PiKVM absolute coordinates
 
-PiKVM HID mouse operates in absolute mode: coordinates are 0–65535 on
-each axis (16-bit unsigned).  Auto-calibration detects the target's
-display resolution from screenshots and maps pixel coordinates to HID
-space so callers can think in pixels.
+PiKVM HID mouse operates in absolute mode through the HTTP API with a
+center-origin coordinate system: ``(0, 0)`` is screen center, approximately
+``(-32768, -32768)`` is top-left, and ``(32767, 32767)`` is bottom-right.
+Auto-calibration detects the target's display resolution from screenshots
+and maps pixel coordinates to that API coordinate space so callers can think
+in pixels.
 
 PiKVM API endpoints:
     GET  /api/hid                — HID state (keyboard/mouse availability)
     GET  /api/streamer/snapshot  — JPEG screenshot of target display
     POST /api/hid/print          — type text string character by character
-    POST /api/hid/events         — send keyboard/mouse events
+    POST /api/hid/events/send_key            — send a single key event
+    POST /api/hid/events/send_shortcut       — send a keyboard shortcut
+    POST /api/hid/events/send_mouse_move     — absolute mouse move
+    POST /api/hid/events/send_mouse_button   — mouse button press/release
+    POST /api/hid/events/send_mouse_wheel    — mouse wheel scroll
 """
 
 from __future__ import annotations
 
-import asyncio
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -32,33 +37,42 @@ import structlog
 logger = structlog.get_logger()
 
 # PiKVM absolute mouse coordinate space
-_HID_ABS_MAX = 65535
+_HID_ABS_MIN = -32768
+_HID_ABS_MAX = 32767
+_HID_ABS_RANGE = _HID_ABS_MAX - _HID_ABS_MIN
 
 
 # ---------------------------------------------------------------------------
-# Auto-calibration: screen resolution → HID coordinate mapping
+# Auto-calibration: screen resolution → PiKVM coordinate mapping
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class DisplayCalibration:
-    """Maps pixel coordinates to PiKVM's 0–65535 HID absolute space."""
+    """Maps pixel coordinates to PiKVM's center-origin absolute space."""
 
     width: int
     height: int
 
     @property
     def scale_x(self) -> float:
-        return _HID_ABS_MAX / self.width
+        return _HID_ABS_RANGE / self.width
 
     @property
     def scale_y(self) -> float:
-        return _HID_ABS_MAX / self.height
+        return _HID_ABS_RANGE / self.height
 
     def pixel_to_hid(self, x: int, y: int) -> tuple[int, int]:
-        """Convert pixel coordinates to HID absolute coordinates."""
-        hid_x = min(int(x * self.scale_x), _HID_ABS_MAX)
-        hid_y = min(int(y * self.scale_y), _HID_ABS_MAX)
+        """Convert pixel coordinates to PiKVM absolute coordinates.
+
+        PiKVM's HTTP API uses a center-origin coordinate system where
+        ``(0, 0)`` is screen center, roughly ``(-32768, -32768)`` is top-left,
+        and ``(32767, 32767)`` is bottom-right.
+        """
+        hid_x = round((x / self.width) * _HID_ABS_RANGE + _HID_ABS_MIN)
+        hid_y = round((y / self.height) * _HID_ABS_RANGE + _HID_ABS_MIN)
+        hid_x = min(max(hid_x, _HID_ABS_MIN), _HID_ABS_MAX)
+        hid_y = min(max(hid_y, _HID_ABS_MIN), _HID_ABS_MAX)
         return hid_x, hid_y
 
 
@@ -184,10 +198,12 @@ async def type_text(client: Any, *, text: str) -> dict[str, Any]:
     PiKVM's /api/hid/print types character-by-character with appropriate
     key events.  Suitable for typing into login prompts, terminals, etc.
     """
-    return await client.post("/api/hid/print", params={"text": text})
+    return await client.post("/api/hid/print", content=text)
 
 
-async def send_key(client: Any, *, key: str, state: bool = True) -> dict[str, Any]:
+async def send_key(
+    client: Any, *, key: str, state: bool = True, finish: bool = False
+) -> dict[str, Any]:
     """Press or release a single key.
 
     ``key`` uses PiKVM/USB-HID key names:
@@ -200,10 +216,14 @@ async def send_key(client: Any, *, key: str, state: bool = True) -> dict[str, An
                    AltLeft, AltRight, MetaLeft, MetaRight
         Navigation: Home, End, PageUp, PageDown
 
-    ``state`` True = press, False = release.
+    ``state`` True = press, False = release.  ``finish`` asks PiKVM to release
+    non-modifier keys immediately after pressing, which is useful for one-shot
+    keys like Enter when the connection may be unstable.
     """
-    event = {"key": key, "state": state}
-    return await client.post("/api/hid/events", json={"events": [event]})
+    return await client.post(
+        "/api/hid/events/send_key",
+        params={"key": key, "state": int(state), "finish": int(finish)},
+    )
 
 
 async def send_shortcut(
@@ -211,27 +231,17 @@ async def send_shortcut(
 ) -> dict[str, Any]:
     """Send a keyboard shortcut (e.g. Ctrl+Alt+Delete).
 
-    Presses keys in order, waits ``hold_ms`` milliseconds, then releases
-    in reverse order.  This mimics natural keyboard shortcut behavior.
+    PiKVM handles the press/release sequence internally.  ``hold_ms`` is kept
+    for backwards-compatible tool signatures and currently ignored by the HTTP
+    API.
 
     Example: ``keys=["ControlLeft", "AltLeft", "Delete"]``
     """
-    events: list[dict[str, Any]] = []
-
-    # Press all keys in order
-    for key in keys:
-        events.append({"key": key, "state": True})
-
-    result = await client.post("/api/hid/events", json={"events": events})
-
-    # Hold briefly
-    await asyncio.sleep(hold_ms / 1000.0)
-
-    # Release all keys in reverse order
-    release_events = [{"key": key, "state": False} for key in reversed(keys)]
-    await client.post("/api/hid/events", json={"events": release_events})
-
-    return result
+    _ = hold_ms
+    return await client.post(
+        "/api/hid/events/send_shortcut",
+        params={"keys": ",".join(keys)},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,22 +255,21 @@ async def mouse_move(
     """Move the mouse cursor.
 
     If ``absolute=True`` (default), x/y are pixel coordinates that get
-    auto-calibrated to HID space (0–65535).  Requires a prior screenshot
-    or explicit calibrate() call.
+    auto-calibrated to PiKVM's center-origin absolute coordinate space.
 
-    If ``absolute=False``, x/y are raw HID coordinates (0–65535).
+    If ``absolute=False``, x/y are raw PiKVM absolute coordinates.
     """
     if absolute:
         cal = await calibrate(client)
         hid_x, hid_y = cal.pixel_to_hid(x, y)
     else:
-        hid_x = min(max(x, 0), _HID_ABS_MAX)
-        hid_y = min(max(y, 0), _HID_ABS_MAX)
+        hid_x = min(max(x, _HID_ABS_MIN), _HID_ABS_MAX)
+        hid_y = min(max(y, _HID_ABS_MIN), _HID_ABS_MAX)
 
-    event = {
-        "mouse_move": {"x": hid_x, "y": hid_y},
-    }
-    return await client.post("/api/hid/events", json={"events": [event]})
+    return await client.post(
+        "/api/hid/events/send_mouse_move",
+        params={"to_x": hid_x, "to_y": hid_y},
+    )
 
 
 async def mouse_click(
@@ -279,23 +288,20 @@ async def mouse_click(
     button_map = {"left": "left", "right": "right", "middle": "middle"}
     btn = button_map.get(button.lower(), "left")
 
-    events: list[dict[str, Any]] = []
-
     # Move first if coordinates given
     if x is not None and y is not None:
-        if absolute:
-            cal = await calibrate(client)
-            hid_x, hid_y = cal.pixel_to_hid(x, y)
-        else:
-            hid_x = min(max(x, 0), _HID_ABS_MAX)
-            hid_y = min(max(y, 0), _HID_ABS_MAX)
-        events.append({"mouse_move": {"x": hid_x, "y": hid_y}})
+        await mouse_move(client, x=x, y=y, absolute=absolute)
 
     # Press and release
-    events.append({"mouse_button": {"button": btn, "state": True}})
-    events.append({"mouse_button": {"button": btn, "state": False}})
-
-    return await client.post("/api/hid/events", json={"events": events})
+    result = await client.post(
+        "/api/hid/events/send_mouse_button",
+        params={"button": btn, "state": 1},
+    )
+    await client.post(
+        "/api/hid/events/send_mouse_button",
+        params={"button": btn, "state": 0},
+    )
+    return result
 
 
 async def mouse_scroll(
@@ -309,7 +315,7 @@ async def mouse_scroll(
     ``delta_y``: positive = scroll up, negative = scroll down
     ``delta_x``: positive = scroll right, negative = scroll left
     """
-    event = {
-        "mouse_wheel": {"x": delta_x, "y": delta_y},
-    }
-    return await client.post("/api/hid/events", json={"events": [event]})
+    return await client.post(
+        "/api/hid/events/send_mouse_wheel",
+        params={"delta_x": delta_x, "delta_y": delta_y},
+    )
