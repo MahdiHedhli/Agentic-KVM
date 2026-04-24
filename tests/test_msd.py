@@ -7,7 +7,7 @@ import respx
 
 from pikvm_mcp.client import PiKVMClient
 from pikvm_mcp.config import TargetConfig
-from pikvm_mcp.tools.msd import msd_connect, msd_disconnect, msd_set_image, msd_state
+from pikvm_mcp.tools.msd import UploadProgress, msd_connect, msd_disconnect, msd_set_image, msd_state
 
 BASE = "https://pikvm-test.ts.net:443"
 
@@ -74,3 +74,54 @@ class TestMSDTools:
             assert result["ok"] is True
             assert "connected=0" in str(route.calls[0].request.url)
         await client.close()
+
+
+class TestUploadProgress:
+    def test_initial_state(self) -> None:
+        p = UploadProgress()
+        assert p.status == "pending"
+        assert p.percent == 0
+        assert not p.finished
+
+    def test_update_downloading(self) -> None:
+        p = UploadProgress()
+        p.update({
+            "status": "downloading",
+            "percent": 42,
+            "total": 1_073_741_824,
+            "written": 450_887_680,
+        })
+        assert p.status == "downloading"
+        assert p.percent == 42
+        assert p.total_bytes == 1_073_741_824
+        assert p.written_bytes == 450_887_680
+        assert not p.finished
+
+    def test_update_finish(self) -> None:
+        p = UploadProgress()
+        p.update({"status": "finish"})
+        assert p.finished
+        assert p.error is None
+
+    def test_update_error(self) -> None:
+        p = UploadProgress()
+        p.update({"status": "error", "error": "Network timeout"})
+        assert p.finished
+        assert p.error == "Network timeout"
+
+    def test_to_dict(self) -> None:
+        p = UploadProgress()
+        p.update({"status": "downloading", "percent": 75, "total": 1000, "written": 750})
+        d = p.to_dict()
+        assert d["status"] == "downloading"
+        assert d["percent"] == 75
+        assert d["total_bytes"] == 1000
+        assert d["written_bytes"] == 750
+        assert d["error"] is None
+
+    def test_events_accumulate(self) -> None:
+        p = UploadProgress()
+        p.update({"status": "downloading", "percent": 25})
+        p.update({"status": "downloading", "percent": 50})
+        p.update({"status": "finish"})
+        assert len(p.events) == 3

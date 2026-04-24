@@ -6,6 +6,7 @@ unifi-network-mcp deployment pattern.
 
 from __future__ import annotations
 
+import base64
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
@@ -123,7 +124,7 @@ async def pikvm_msd_upload_url(
     """Download an image from a URL into PiKVM MSD storage (server-side fetch).
 
     Use this to load ISO installers, firmware images, etc. Long-running — PiKVM
-    downloads the file, not the MCP client.
+    downloads the file, not the MCP client.  Streams progress via SSE.
     """
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_target_name)(msd.msd_upload_url)
@@ -202,21 +203,51 @@ async def pikvm_atx_reset(target: str | None = None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# HID tools (skeleton — wired up but minimal)
+# HID tools — full implementation
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool()
 async def pikvm_hid_state(target: str | None = None) -> dict[str, Any]:
-    """Get HID subsystem state (keyboard/mouse availability)."""
+    """Get HID subsystem state (keyboard/mouse availability, modes)."""
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_target_name)(hid.hid_state)
     return await fn(client=_client_for(target), target=target)
 
 
 @mcp.tool()
+async def pikvm_screenshot(target: str | None = None) -> dict[str, Any]:
+    """Capture a JPEG screenshot of the target's display.
+
+    Returns base64-encoded JPEG data and the detected resolution.
+    Also triggers auto-calibration for mouse coordinate mapping.
+    """
+    recorder = _get_recorder()
+
+    async def _screenshot(*, client: Any, target: str | None = None) -> dict[str, Any]:
+        jpeg_data = await hid.screenshot(client)
+        try:
+            width, height = hid.detect_resolution_from_jpeg(jpeg_data)
+        except ValueError:
+            width, height = 0, 0
+        return {
+            "image_base64": base64.b64encode(jpeg_data).decode("ascii"),
+            "content_type": "image/jpeg",
+            "resolution": {"width": width, "height": height},
+            "size_bytes": len(jpeg_data),
+        }
+
+    fn = audited(recorder, _resolve_target_name)(_screenshot)
+    return await fn(client=_client_for(target), target=target)
+
+
+@mcp.tool()
 async def pikvm_hid_type(text: str, target: str | None = None) -> dict[str, Any]:
-    """Type a text string on the target's keyboard."""
+    """Type a text string on the target's keyboard.
+
+    Characters are sent one at a time via PiKVM's HID print endpoint.
+    Good for typing into login prompts, terminals, BIOS fields, etc.
+    """
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_target_name)(hid.type_text)
     return await fn(client=_client_for(target), text=text, target=target)
@@ -226,10 +257,106 @@ async def pikvm_hid_type(text: str, target: str | None = None) -> dict[str, Any]
 async def pikvm_hid_send_key(
     key: str, state: bool = True, target: str | None = None
 ) -> dict[str, Any]:
-    """Press or release a key. Use PiKVM key names (e.g. 'Enter', 'F12', 'KeyA')."""
+    """Press or release a key.
+
+    Key names follow PiKVM/USB-HID convention:
+    - Letters: KeyA..KeyZ  - Digits: Digit0..Digit9  - Function: F1..F12
+    - Enter, Escape, Backspace, Tab, Space, Delete, Insert
+    - ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown
+    - Modifiers: ShiftLeft, ControlLeft, AltLeft, MetaLeft (and Right variants)
+
+    state=True means press, state=False means release.
+    """
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_target_name)(hid.send_key)
     return await fn(client=_client_for(target), key=key, state=state, target=target)
+
+
+@mcp.tool()
+async def pikvm_hid_shortcut(
+    keys: list[str], hold_ms: int = 100, target: str | None = None
+) -> dict[str, Any]:
+    """Send a keyboard shortcut (multi-key combo).
+
+    Presses keys in order, holds for hold_ms, then releases in reverse.
+    Example: keys=["ControlLeft", "AltLeft", "Delete"] for Ctrl+Alt+Del
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_target_name)(hid.send_shortcut)
+    return await fn(client=_client_for(target), keys=keys, hold_ms=hold_ms, target=target)
+
+
+@mcp.tool()
+async def pikvm_mouse_move(
+    x: int, y: int, absolute: bool = True, target: str | None = None
+) -> dict[str, Any]:
+    """Move the mouse cursor to coordinates.
+
+    With absolute=True (default), x/y are pixel coordinates — auto-calibration
+    maps them to HID space using the detected screen resolution.
+    With absolute=False, x/y are raw HID coordinates (0–65535).
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_target_name)(hid.mouse_move)
+    return await fn(client=_client_for(target), x=x, y=y, absolute=absolute, target=target)
+
+
+@mcp.tool()
+async def pikvm_mouse_click(
+    button: str = "left",
+    x: int | None = None,
+    y: int | None = None,
+    absolute: bool = True,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """Click a mouse button, optionally at specific coordinates.
+
+    button: "left", "right", or "middle"
+    If x/y given, moves there first then clicks.
+    Coordinates follow the same absolute/raw rules as mouse_move.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_target_name)(hid.mouse_click)
+    return await fn(
+        client=_client_for(target), button=button, x=x, y=y, absolute=absolute, target=target
+    )
+
+
+@mcp.tool()
+async def pikvm_mouse_scroll(
+    delta_x: int = 0, delta_y: int = 0, target: str | None = None
+) -> dict[str, Any]:
+    """Scroll the mouse wheel.
+
+    delta_y: positive = up, negative = down
+    delta_x: positive = right, negative = left
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_target_name)(hid.mouse_scroll)
+    return await fn(client=_client_for(target), delta_x=delta_x, delta_y=delta_y, target=target)
+
+
+@mcp.tool()
+async def pikvm_hid_calibrate(target: str | None = None) -> dict[str, Any]:
+    """Force re-calibration of mouse coordinate mapping.
+
+    Takes a fresh screenshot to detect the current display resolution,
+    then updates the pixel-to-HID coordinate mapping.  Call this if the
+    target's display resolution changed.
+    """
+    recorder = _get_recorder()
+
+    async def _recalibrate(*, client: Any, target: str | None = None) -> dict[str, Any]:
+        cal = await hid.recalibrate(client)
+        return {
+            "width": cal.width,
+            "height": cal.height,
+            "scale_x": round(cal.scale_x, 4),
+            "scale_y": round(cal.scale_y, 4),
+        }
+
+    fn = audited(recorder, _resolve_target_name)(_recalibrate)
+    return await fn(client=_client_for(target), target=target)
 
 
 # ---------------------------------------------------------------------------
