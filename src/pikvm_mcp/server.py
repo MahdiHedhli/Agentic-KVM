@@ -18,7 +18,7 @@ from fastmcp import FastMCP
 from pikvm_mcp.audit import SessionRecorder, audited
 from pikvm_mcp.client import ClientRegistry
 from pikvm_mcp.config import AppConfig, load_env_file_from_environment
-from pikvm_mcp.tools import atx, hid, msd
+from pikvm_mcp.tools import atx, hid, msd, streamer
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -374,6 +374,65 @@ async def pikvm_hid_calibrate(target: str | None = None) -> dict[str, Any]:
 
     fn = audited(recorder, _resolve_target_name)(_recalibrate)
     return await fn(client=_client_for(target), target=target)
+
+
+# ---------------------------------------------------------------------------
+# Streamer tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def pikvm_streamer_state(target: str | None = None) -> dict[str, Any]:
+    """Get streamer / video-source state.
+
+    Returns a normalized dict::
+
+        {
+          "source_online": bool,        # is HDMI source currently emitting video
+          "source_resolution": {"w": int, "h": int},
+          "has_clients": bool,          # any active stream consumers
+          "encoder_type": str           # e.g. "CPU", "OMX", "M2M-VIDEO"
+        }
+
+    ``source_online=False`` typically means the target is asleep, off, or
+    its display is in DPMS-off — that's the cue for ``pikvm_wake_host``.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_target_name)(streamer.streamer_state)
+    return await fn(client=_client_for(target), target=target)
+
+
+@mcp.tool()
+async def pikvm_wake_host(
+    poll_interval: float = 3.0,
+    timeout: float = 30.0,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """Wake a sleeping host by jiggling USB HID, then poll until video returns.
+
+    Reads ``/api/streamer`` first; if the source is already online, returns
+    ``{"woke": false, "reason": "already_online", ...}`` without sending any
+    events. Otherwise sends 5 raw-coordinate mouse moves (no calibration —
+    works with the streamer offline) and 5 auto-released key events
+    (Space / ShiftLeft / Enter), then polls every ``poll_interval`` seconds
+    for up to ``timeout`` seconds.
+
+    Returns ``{"woke": bool, "elapsed_seconds": float, "attempts": int,
+    "state": {...}}`` plus a ``"reason"`` of ``"already_online"`` or
+    ``"timeout"`` when ``woke`` is False.
+
+    Wake-on-USB must be enabled at the firmware/OS layer for this to do
+    anything; if the host disabled USB-wake, the call will time out and
+    you'll need ATX reset or WoL instead.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_target_name)(streamer.wake_host)
+    return await fn(
+        client=_client_for(target),
+        poll_interval=poll_interval,
+        timeout=timeout,
+        target=target,
+    )
 
 
 # ---------------------------------------------------------------------------
