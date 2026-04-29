@@ -62,6 +62,8 @@ class IpmiTargetConfig(BaseModel):
     name: str = Field(description="Human-readable BMC identifier")
     host: str = Field(description="Hostname or IP, ideally on a management network or Tailnet")
     port: int = Field(default=623, description="RMCP/RMCP+ UDP port")
+    web_port: int = Field(default=443, description="HTTPS web UI / Redfish port")
+    web_https: bool = Field(default=True, description="Use HTTPS for the BMC web UI")
     username: str = Field(default="ADMIN")
     password: SecretStr = Field(description="BMC/IPMI password")
     kg: SecretStr | None = Field(
@@ -76,6 +78,19 @@ class IpmiTargetConfig(BaseModel):
         default="supermicro",
         description="Vendor label for inventory/audit context; IPMI tools are generic",
     )
+    web_verify_ssl: bool = Field(
+        default=False,
+        description="Verify TLS cert for the BMC web UI; false is pragmatic for lab self-signed certs",
+    )
+    web_cert_fingerprint: str | None = Field(
+        default=None,
+        description="Optional SHA-256 fingerprint for pinning the BMC web certificate",
+    )
+
+    @property
+    def web_base_url(self) -> str:
+        scheme = "https" if self.web_https else "http"
+        return f"{scheme}://{self.host}:{self.web_port}"
 
 
 class AppConfig(BaseSettings):

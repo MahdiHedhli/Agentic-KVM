@@ -19,7 +19,8 @@ from pikvm_mcp.audit import SessionRecorder, audited
 from pikvm_mcp.client import ClientRegistry
 from pikvm_mcp.config import AppConfig, load_env_file_from_environment
 from pikvm_mcp.ipmi_client import IpmiClientRegistry
-from pikvm_mcp.tools import atx, hid, ipmi, msd, streamer
+from pikvm_mcp.supermicro_client import SupermicroClientRegistry
+from pikvm_mcp.tools import atx, hid, ipmi, msd, streamer, supermicro
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -43,6 +44,7 @@ logger = structlog.get_logger()
 _config: AppConfig | None = None
 _registry: ClientRegistry | None = None
 _ipmi_registry: IpmiClientRegistry | None = None
+_supermicro_registry: SupermicroClientRegistry | None = None
 _recorder: SessionRecorder | None = None
 
 
@@ -66,6 +68,11 @@ def _get_recorder() -> SessionRecorder:
     return _recorder
 
 
+def _get_supermicro_registry() -> SupermicroClientRegistry:
+    assert _supermicro_registry is not None, "Server not started — Supermicro registry not initialized"
+    return _supermicro_registry
+
+
 def _resolve_target_name(**kwargs: Any) -> str:
     cfg = _get_config()
     target_name = kwargs.get("target")
@@ -85,11 +92,12 @@ def _resolve_ipmi_target_name(**kwargs: Any) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
-    global _config, _registry, _ipmi_registry, _recorder
+    global _config, _registry, _ipmi_registry, _supermicro_registry, _recorder
     env_file = load_env_file_from_environment()
     _config = AppConfig()
     _registry = ClientRegistry()
     _ipmi_registry = IpmiClientRegistry()
+    _supermicro_registry = SupermicroClientRegistry()
     _recorder = SessionRecorder(
         audit_dir=_config.audit_dir,
         operator_id=_config.operator_id,
@@ -109,6 +117,7 @@ async def lifespan(app: FastMCP):
     _recorder.close()
     await _registry.close_all()
     await _ipmi_registry.close_all()
+    await _supermicro_registry.close_all()
     logger.info("server_stopped")
 
 
@@ -131,6 +140,13 @@ def _ipmi_client_for(target: str | None = None):
     cfg = _get_config()
     target_cfg = cfg.resolve_ipmi_target(target)
     return _get_ipmi_registry().get_or_create(target_cfg)
+
+
+def _supermicro_client_for(target: str | None = None):
+    """Resolve target name -> Supermicro legacy web client."""
+    cfg = _get_config()
+    target_cfg = cfg.resolve_ipmi_target(target)
+    return _get_supermicro_registry().get_or_create(target_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +588,86 @@ async def ipmi_power_reset(wait: bool = False, target: str | None = None) -> dic
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.power_reset)
     return await fn(client=_ipmi_client_for(target), wait=wait, target=target)
+
+
+# ---------------------------------------------------------------------------
+# Supermicro legacy web iKVM / virtual-media tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def supermicro_vm_status(target: str | None = None) -> dict[str, Any]:
+    """Return Supermicro legacy virtual-media slot state.
+
+    This uses the older CGI interface present on many X10/X11-era BMCs. It is
+    separate from generic IPMI because virtual media is a vendor web-console
+    feature, not an IPMI standard capability.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro.vm_status)
+    return await fn(client=_supermicro_client_for(target), target=target)
+
+
+@mcp.tool()
+async def supermicro_vm_config_get(target: str | None = None) -> dict[str, Any]:
+    """Return the configured Supermicro legacy virtual-media source."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro.vm_config_get)
+    return await fn(client=_supermicro_client_for(target), target=target)
+
+
+@mcp.tool()
+async def supermicro_vm_config_set(
+    host: str,
+    path: str,
+    user: str = "",
+    password: str = "",
+    target: str | None = None,
+) -> dict[str, Any]:
+    """Configure the Supermicro legacy virtual-media source.
+
+    HTTP example:
+    - host: ``https://10.0.0.10:8080``
+    - path: ``/isos/alpine.iso``
+
+    SMB example:
+    - host: ``10.0.0.10``
+    - path: ``\\\\share\\folder\\installer.iso``
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro.vm_config_set)
+    return await fn(
+        client=_supermicro_client_for(target),
+        host=host,
+        path=path,
+        user=user,
+        password=password,
+        target=target,
+    )
+
+
+@mcp.tool()
+async def supermicro_vm_mount(target: str | None = None) -> dict[str, Any]:
+    """Mount the configured Supermicro legacy virtual-media image."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro.vm_mount)
+    return await fn(client=_supermicro_client_for(target), target=target)
+
+
+@mcp.tool()
+async def supermicro_vm_unmount(target: str | None = None) -> dict[str, Any]:
+    """Unmount the currently mounted Supermicro legacy virtual-media image."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro.vm_unmount)
+    return await fn(client=_supermicro_client_for(target), target=target)
+
+
+@mcp.tool()
+async def supermicro_ikvm_jnlp(target: str | None = None) -> dict[str, Any]:
+    """Fetch and parse the authenticated ATEN/Supermicro Java iKVM launch descriptor."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro.ikvm_jnlp)
+    return await fn(client=_supermicro_client_for(target), target=target)
 
 
 # ---------------------------------------------------------------------------
