@@ -73,6 +73,13 @@ class FakeCommand:
         return 123
 
 
+class FakeBadEventLogCommand(FakeCommand):
+    def get_event_log(self, clear: bool = False):
+        assert clear is False
+        yield {"record_id": 1, "event": "Power Unit", "severity": "ok"}
+        raise RuntimeError("Unrecognized Event message version 0")
+
+
 def _cfg() -> IpmiTargetConfig:
     return IpmiTargetConfig(
         name="sm-lab",
@@ -150,6 +157,19 @@ class TestIpmiClient:
         assert result["total_count"] == 2
         assert result["events"][0]["record_id"] == 2
         assert result["truncated_to"] == 1
+        assert result["partial"] is False
+        assert result["decode_error"] is None
+
+    async def test_event_log_preserves_partial_data_on_decode_error(self) -> None:
+        client = IpmiClient(_cfg(), command_factory=FakeBadEventLogCommand)
+
+        result = await client.event_log(limit=20)
+
+        assert result["count"] == 1
+        assert result["total_count"] == 1
+        assert result["events"][0]["record_id"] == 1
+        assert result["partial"] is True
+        assert result["decode_error"] == "Unrecognized Event message version 0"
 
     async def test_inventory_firmware_and_power(self) -> None:
         client = IpmiClient(_cfg(), command_factory=FakeCommand)

@@ -160,7 +160,10 @@ class IpmiClient:
         return [_sensor_reading_to_dict(reading) for reading in await self._call_list("get_sensor_data")]
 
     async def event_log(self, *, limit: int = 50) -> dict[str, Any]:
-        events = [_jsonable(event) for event in await self._call_list("get_event_log", clear=False)]
+        async with self._lock:
+            command = await self._ensure_command()
+            events, decode_error = await asyncio.to_thread(_collect_event_log, command)
+
         total_count = len(events)
         if limit > 0:
             events = events[-limit:]
@@ -169,6 +172,8 @@ class IpmiClient:
             "count": len(events),
             "total_count": total_count,
             "truncated_to": limit if limit > 0 else None,
+            "partial": decode_error is not None,
+            "decode_error": decode_error,
         }
 
     async def inventory(self) -> dict[str, Any]:
@@ -207,3 +212,19 @@ class IpmiClientRegistry:
         for client in self._clients.values():
             await client.close()
         self._clients.clear()
+
+
+def _collect_event_log(command: Any) -> tuple[list[Any], str | None]:
+    """Collect SEL events, preserving partial data if a BMC record is malformed.
+
+    Some Supermicro BMCs can return SEL records pyghmi cannot decode.  The
+    event log is useful read-only telemetry, but one malformed entry should not
+    make the MCP tool unusable.
+    """
+    events: list[Any] = []
+    try:
+        for event in command.get_event_log(clear=False):
+            events.append(_jsonable(event))
+    except Exception as exc:  # noqa: BLE001 - preserve partial SEL data for operators
+        return events, str(exc)
+    return events, None
