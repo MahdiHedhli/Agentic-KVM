@@ -11,6 +11,9 @@ Environment variable layout (flat, Docker-friendly)::
     PIKVM_AUDIT_DIR=/var/log/pikvm-mcp
     PIKVM_OPERATOR_ID=operator@redteam
     PIKVM_FULL_CAPTURE=false
+
+    IPMI_TARGETS='[{"name":"sm-lab","host":"ipmi-lab.ts.net",...}]'
+    IPMI_DEFAULT_TARGET=sm-lab
 """
 
 from __future__ import annotations
@@ -53,6 +56,28 @@ class TargetConfig(BaseModel):
         return f"{scheme}://{self.host}:{self.port}"
 
 
+class IpmiTargetConfig(BaseModel):
+    """Connection details for a single IPMI/BMC target."""
+
+    name: str = Field(description="Human-readable BMC identifier")
+    host: str = Field(description="Hostname or IP, ideally on a management network or Tailnet")
+    port: int = Field(default=623, description="RMCP/RMCP+ UDP port")
+    username: str = Field(default="ADMIN")
+    password: SecretStr = Field(description="BMC/IPMI password")
+    kg: SecretStr | None = Field(
+        default=None,
+        description="Optional IPMI Kg key when configured on the BMC",
+    )
+    privlevel: str | None = Field(
+        default=None,
+        description="Optional pyghmi privilege level override",
+    )
+    vendor: str = Field(
+        default="supermicro",
+        description="Vendor label for inventory/audit context; IPMI tools are generic",
+    )
+
+
 class AppConfig(BaseSettings):
     """Top-level application settings, loaded from env vars."""
 
@@ -84,15 +109,29 @@ class AppConfig(BaseSettings):
         alias="PIKVM_FULL_CAPTURE",
         description="Log sensitive operator-entered HID text for explicit full-capture sessions",
     )
+    ipmi_targets_json: str = Field(
+        default="[]",
+        alias="IPMI_TARGETS",
+        description="JSON array of IpmiTargetConfig objects",
+    )
+    default_ipmi_target: str | None = Field(
+        default=None,
+        alias="IPMI_DEFAULT_TARGET",
+        description="Name of the default IPMI/BMC target",
+    )
 
     # --- Parsed from JSON at validation time ---
     targets: list[TargetConfig] = Field(default_factory=list, exclude=True)
+    ipmi_targets: list[IpmiTargetConfig] = Field(default_factory=list, exclude=True)
 
     @model_validator(mode="after")
     def _parse_targets_json(self) -> Self:
         if self.targets_json and self.targets_json != "[]":
             raw = json.loads(self.targets_json)
             self.targets = [TargetConfig(**t) for t in raw]
+        if self.ipmi_targets_json and self.ipmi_targets_json != "[]":
+            raw = json.loads(self.ipmi_targets_json)
+            self.ipmi_targets = [IpmiTargetConfig(**t) for t in raw]
         return self
 
     def resolve_target(self, name: str | None = None) -> TargetConfig:
@@ -111,6 +150,22 @@ class AppConfig(BaseSettings):
         if self.default_target:
             return self.resolve_target(self.default_target)
         return self.targets[0]
+
+    def resolve_ipmi_target(self, name: str | None = None) -> IpmiTargetConfig:
+        """Return the named IPMI target, or the default, or the first configured."""
+        if not self.ipmi_targets:
+            raise ValueError("No IPMI targets configured. Set IPMI_TARGETS env var.")
+        if name:
+            for t in self.ipmi_targets:
+                if t.name == name:
+                    return t
+            raise ValueError(
+                f"IPMI target '{name}' not found. Available: "
+                f"{[t.name for t in self.ipmi_targets]}"
+            )
+        if self.default_ipmi_target:
+            return self.resolve_ipmi_target(self.default_ipmi_target)
+        return self.ipmi_targets[0]
 
 
 def load_env_file_from_environment() -> Path | None:

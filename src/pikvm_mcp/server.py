@@ -18,7 +18,8 @@ from fastmcp import FastMCP
 from pikvm_mcp.audit import SessionRecorder, audited
 from pikvm_mcp.client import ClientRegistry
 from pikvm_mcp.config import AppConfig, load_env_file_from_environment
-from pikvm_mcp.tools import atx, hid, msd, streamer
+from pikvm_mcp.ipmi_client import IpmiClientRegistry
+from pikvm_mcp.tools import atx, hid, ipmi, msd, streamer
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -41,6 +42,7 @@ logger = structlog.get_logger()
 
 _config: AppConfig | None = None
 _registry: ClientRegistry | None = None
+_ipmi_registry: IpmiClientRegistry | None = None
 _recorder: SessionRecorder | None = None
 
 
@@ -54,6 +56,11 @@ def _get_registry() -> ClientRegistry:
     return _registry
 
 
+def _get_ipmi_registry() -> IpmiClientRegistry:
+    assert _ipmi_registry is not None, "Server not started — IPMI registry not initialized"
+    return _ipmi_registry
+
+
 def _get_recorder() -> SessionRecorder:
     assert _recorder is not None, "Server not started — recorder not initialized"
     return _recorder
@@ -65,6 +72,12 @@ def _resolve_target_name(**kwargs: Any) -> str:
     return cfg.resolve_target(target_name).name
 
 
+def _resolve_ipmi_target_name(**kwargs: Any) -> str:
+    cfg = _get_config()
+    target_name = kwargs.get("target")
+    return cfg.resolve_ipmi_target(target_name).name
+
+
 # ---------------------------------------------------------------------------
 # FastMCP app
 # ---------------------------------------------------------------------------
@@ -72,10 +85,11 @@ def _resolve_target_name(**kwargs: Any) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastMCP):
-    global _config, _registry, _recorder
+    global _config, _registry, _ipmi_registry, _recorder
     env_file = load_env_file_from_environment()
     _config = AppConfig()
     _registry = ClientRegistry()
+    _ipmi_registry = IpmiClientRegistry()
     _recorder = SessionRecorder(
         audit_dir=_config.audit_dir,
         operator_id=_config.operator_id,
@@ -84,7 +98,9 @@ async def lifespan(app: FastMCP):
     logger.info(
         "server_started",
         targets=[t.name for t in _config.targets],
+        ipmi_targets=[t.name for t in _config.ipmi_targets],
         default_target=_config.default_target,
+        default_ipmi_target=_config.default_ipmi_target,
         audit_dir=str(_config.audit_dir),
         full_capture=_config.full_capture,
         env_file=str(env_file) if env_file else None,
@@ -92,6 +108,7 @@ async def lifespan(app: FastMCP):
     yield
     _recorder.close()
     await _registry.close_all()
+    await _ipmi_registry.close_all()
     logger.info("server_stopped")
 
 
@@ -107,6 +124,13 @@ def _client_for(target: str | None = None):
     cfg = _get_config()
     target_cfg = cfg.resolve_target(target)
     return _get_registry().get_or_create(target_cfg)
+
+
+def _ipmi_client_for(target: str | None = None):
+    """Resolve target name → IpmiClient."""
+    cfg = _get_config()
+    target_cfg = cfg.resolve_ipmi_target(target)
+    return _get_ipmi_registry().get_or_create(target_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +457,121 @@ async def pikvm_wake_host(
         timeout=timeout,
         target=target,
     )
+
+
+# ---------------------------------------------------------------------------
+# IPMI/BMC tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def ipmi_power_state(target: str | None = None) -> dict[str, Any]:
+    """Get current IPMI/BMC power state for the selected server."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.power_state)
+    return await fn(client=_ipmi_client_for(target), target=target)
+
+
+@mcp.tool()
+async def ipmi_health(target: str | None = None) -> dict[str, Any]:
+    """Get summarized IPMI/BMC health state and unhealthy readings."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.health)
+    return await fn(client=_ipmi_client_for(target), target=target)
+
+
+@mcp.tool()
+async def ipmi_sensors(
+    only_unhealthy: bool = False,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """Get normalized IPMI sensor readings.
+
+    Set only_unhealthy=True to return warning, critical, failed, or unavailable
+    readings only.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.sensors)
+    return await fn(
+        client=_ipmi_client_for(target),
+        only_unhealthy=only_unhealthy,
+        target=target,
+    )
+
+
+@mcp.tool()
+async def ipmi_event_log(limit: int = 50, target: str | None = None) -> dict[str, Any]:
+    """Get the BMC System Event Log without clearing it."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.event_log)
+    return await fn(client=_ipmi_client_for(target), limit=limit, target=target)
+
+
+@mcp.tool()
+async def ipmi_inventory(target: str | None = None) -> dict[str, Any]:
+    """Get BMC-provided inventory data.
+
+    Inventory may include serial numbers or hardware addresses. Treat the
+    result as sensitive engagement data.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.inventory)
+    return await fn(client=_ipmi_client_for(target), target=target)
+
+
+@mcp.tool()
+async def ipmi_firmware(target: str | None = None) -> dict[str, Any]:
+    """Get BMC-provided firmware data."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.firmware)
+    return await fn(client=_ipmi_client_for(target), target=target)
+
+
+@mcp.tool()
+async def ipmi_system_power_watts(target: str | None = None) -> dict[str, Any]:
+    """Get current system power draw in watts when the BMC supports it."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.system_power_watts)
+    return await fn(client=_ipmi_client_for(target), target=target)
+
+
+@mcp.tool()
+async def ipmi_power_on(wait: bool = False, target: str | None = None) -> dict[str, Any]:
+    """Request system power on through IPMI."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.power_on)
+    return await fn(client=_ipmi_client_for(target), wait=wait, target=target)
+
+
+@mcp.tool()
+async def ipmi_power_shutdown(
+    wait: bool = False,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """Request graceful OS shutdown through IPMI when the host supports it."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.power_shutdown)
+    return await fn(client=_ipmi_client_for(target), wait=wait, target=target)
+
+
+@mcp.tool()
+async def ipmi_power_off(wait: bool = False, target: str | None = None) -> dict[str, Any]:
+    """Request immediate system power off through IPMI.
+
+    This is a disruptive BMC action. Prefer ipmi_power_shutdown when a graceful
+    OS path is available.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.power_off)
+    return await fn(client=_ipmi_client_for(target), wait=wait, target=target)
+
+
+@mcp.tool()
+async def ipmi_power_reset(wait: bool = False, target: str | None = None) -> dict[str, Any]:
+    """Request immediate system reset through IPMI."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(ipmi.power_reset)
+    return await fn(client=_ipmi_client_for(target), wait=wait, target=target)
 
 
 # ---------------------------------------------------------------------------

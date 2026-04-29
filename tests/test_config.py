@@ -6,7 +6,12 @@ import json
 
 import pytest
 
-from pikvm_mcp.config import AppConfig, TargetConfig, load_env_file_from_environment
+from pikvm_mcp.config import (
+    AppConfig,
+    IpmiTargetConfig,
+    TargetConfig,
+    load_env_file_from_environment,
+)
 
 
 class TestTargetConfig:
@@ -23,6 +28,15 @@ class TestTargetConfig:
         assert cfg.username == "admin"
         assert cfg.verify_ssl is False
         assert cfg.cert_fingerprint is None
+
+
+class TestIpmiTargetConfig:
+    def test_defaults(self) -> None:
+        cfg = IpmiTargetConfig(name="sm-lab", host="ipmi-lab.ts.net", password="secret")
+        assert cfg.port == 623
+        assert cfg.username == "ADMIN"
+        assert cfg.vendor == "supermicro"
+        assert cfg.privlevel is None
 
 
 class TestAppConfig:
@@ -82,6 +96,46 @@ class TestAppConfig:
         monkeypatch.setenv("PIKVM_FULL_CAPTURE", "true")
         cfg = AppConfig()
         assert cfg.full_capture is True
+
+    def test_parse_ipmi_targets_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        targets = [
+            {"name": "sm-a", "host": "ipmi-a.ts.net", "password": "secret"},
+            {
+                "name": "sm-b",
+                "host": "ipmi-b.ts.net",
+                "port": 6623,
+                "username": "operator",
+                "password": "secret",
+            },
+        ]
+        monkeypatch.setenv("IPMI_TARGETS", json.dumps(targets))
+        cfg = AppConfig()
+        assert len(cfg.ipmi_targets) == 2
+        assert cfg.ipmi_targets[0].name == "sm-a"
+        assert cfg.ipmi_targets[1].port == 6623
+        assert cfg.ipmi_targets[1].username == "operator"
+
+    def test_resolve_ipmi_target_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        targets = [
+            {"name": "a", "host": "a.ts.net", "password": "secret"},
+            {"name": "b", "host": "b.ts.net", "password": "secret"},
+        ]
+        monkeypatch.setenv("IPMI_TARGETS", json.dumps(targets))
+        monkeypatch.setenv("IPMI_DEFAULT_TARGET", "b")
+        cfg = AppConfig()
+        assert cfg.resolve_ipmi_target().host == "b.ts.net"
+
+    def test_resolve_ipmi_target_missing_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        targets = [{"name": "a", "host": "a.ts.net", "password": "secret"}]
+        monkeypatch.setenv("IPMI_TARGETS", json.dumps(targets))
+        cfg = AppConfig()
+        with pytest.raises(ValueError, match="IPMI target 'missing' not found"):
+            cfg.resolve_ipmi_target("missing")
+
+    def test_no_ipmi_targets_raises(self) -> None:
+        cfg = AppConfig()
+        with pytest.raises(ValueError, match="No IPMI targets configured"):
+            cfg.resolve_ipmi_target()
 
 
 class TestEnvFileLoading:
