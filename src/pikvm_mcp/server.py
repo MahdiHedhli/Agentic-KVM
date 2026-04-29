@@ -10,6 +10,7 @@ import base64
 import logging
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -20,7 +21,7 @@ from pikvm_mcp.client import ClientRegistry
 from pikvm_mcp.config import AppConfig, load_env_file_from_environment
 from pikvm_mcp.ipmi_client import IpmiClientRegistry
 from pikvm_mcp.supermicro_client import SupermicroClientRegistry
-from pikvm_mcp.tools import atx, hid, ipmi, msd, streamer, supermicro
+from pikvm_mcp.tools import atx, hid, ipmi, msd, streamer, supermicro, supermicro_bridge
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -126,6 +127,8 @@ mcp = FastMCP(
     instructions="Bare-metal machine control via PiKVM — MSD, ATX, HID",
     lifespan=lifespan,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _client_for(target: str | None = None):
@@ -668,6 +671,53 @@ async def supermicro_ikvm_jnlp(target: str | None = None) -> dict[str, Any]:
     recorder = _get_recorder()
     fn = audited(recorder, _resolve_ipmi_target_name)(supermicro.ikvm_jnlp)
     return await fn(client=_supermicro_client_for(target), target=target)
+
+
+@mcp.tool()
+async def supermicro_ikvm_prepare_bundle(target: str | None = None) -> dict[str, Any]:
+    """Write a local authenticated iKVM launch bundle.
+
+    The bundle includes the JNLP, manifest, and helper launch scripts. The JNLP
+    contains authenticated session tokens, so treat the bundle as sensitive and
+    short-lived.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro_bridge.prepare_ikvm_bundle)
+    return await fn(
+        client=_supermicro_client_for(target),
+        runtime_dir=_get_config().runtime_dir,
+        target=target,
+    )
+
+
+@mcp.tool()
+async def supermicro_ikvm_launch_bridge(
+    port: int | None = None,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """Launch a local Docker-based noVNC bridge for the Supermicro Java iKVM viewer.
+
+    Returns a localhost URL like ``http://127.0.0.1:6080/vnc.html``. The bridge
+    runs the vendor Java Web Start viewer inside a contained Xvfb/fluxbox/noVNC
+    runtime instead of attempting to reimplement the proprietary ATEN transport.
+    """
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro_bridge.launch_ikvm_bridge)
+    return await fn(
+        client=_supermicro_client_for(target),
+        runtime_dir=_get_config().runtime_dir,
+        repo_root=_REPO_ROOT,
+        port=port,
+        target=target,
+    )
+
+
+@mcp.tool()
+async def supermicro_ikvm_stop_bridge(container_name: str, target: str | None = None) -> dict[str, Any]:
+    """Stop a previously launched Supermicro Docker iKVM bridge container."""
+    recorder = _get_recorder()
+    fn = audited(recorder, _resolve_ipmi_target_name)(supermicro_bridge.stop_ikvm_bridge)
+    return await fn(container_name=container_name, target=target)
 
 
 # ---------------------------------------------------------------------------

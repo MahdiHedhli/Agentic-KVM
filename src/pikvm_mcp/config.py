@@ -115,6 +115,11 @@ class AppConfig(BaseSettings):
         default=Path("/var/log/pikvm-mcp"),
         alias="PIKVM_AUDIT_DIR",
     )
+    runtime_dir: Path = Field(
+        default=Path("~/.agentic-kvm").expanduser(),
+        alias="PIKVM_RUNTIME_DIR",
+        description="Local runtime state for bridge bundles, temp assets, and helper logs",
+    )
     operator_id: str = Field(
         default="unknown",
         alias="PIKVM_OPERATOR_ID",

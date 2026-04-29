@@ -301,6 +301,17 @@ class SupermicroClient:
             "raw_jnlp": jnlp.raw_jnlp,
         }
 
+    async def ikvm_jnlp_info(self) -> JnlpLaunchInfo:
+        async with self._lock:
+            client = await self._ensure_authenticated(
+                csrf_page="/cgi/url_redirect.cgi?url_name=man_ikvm"
+            )
+            resp = await client.get("/cgi/url_redirect.cgi?url_name=ikvm&url_type=jwsk")
+            resp.raise_for_status()
+        if not _jnlp_text_is_authenticated(resp.text):
+            raise SupermicroWebError("BMC returned HTML instead of authenticated iKVM JNLP")
+        return _parse_jnlp(resp.text)
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
